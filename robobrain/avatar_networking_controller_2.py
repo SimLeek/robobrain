@@ -30,12 +30,13 @@ from robonet import camera
 import cv2
 import time
 
-class AvatarController:
-    def __init__(self, num_motors=8, voice_channels=1, camera_resolution=(640, 480), mic_channels=1):
+class AvatarBrain:
+    def __init__(self, num_motors=8, voice_channels=1, voice_fft_size=1536, camera_resolution=(640, 480), mic_channels=1):
         self.num_motors = num_motors
         self.voice_channels = voice_channels
         self.camera_resolution = camera_resolution
         self.mic_channels = mic_channels
+        self.voice_fft_size = voice_fft_size
 
         # Data buffers
         self.motor_data = None
@@ -87,6 +88,9 @@ class AvatarController:
 
     async def run(self):
         while True:
+            await self.set_motor_data(np.random.random([self.num_motors]))
+            await self.set_voice_data(np.random.random([self.voice_fft_size, self.voice_channels]))
+
             print('hi')
             await asyncio.sleep(0)
 async def transmit_motor_random(controller, radio_lock, radio):
@@ -105,7 +109,7 @@ async def transmit_motor_random(controller, radio_lock, radio):
         print(f"Sent motor frame")
         await asyncio.sleep(0)
 
-async def transmit_voice_random(controller, radio_lock, radio, fft_size=1536):
+async def transmit_voice_random(controller, radio_lock, radio):
     """Async function to transmit random voice data"""
     print("transmitting random voice data..")
     while True:
@@ -209,14 +213,14 @@ async def udp_loop(ctx, local_ip, client_ip, args):
     unicast_dish.join("direct")
     unicast_radio.connect(f"udp://{client_ip}:9999")
 
-    controller = AvatarController(num_motors=num_motors, voice_channels=voice_channels)
+    controller = AvatarBrain(num_motors=num_motors, voice_channels=voice_channels)
     d = display()
 
     # todo: modify display_fft
     await asyncio.gather(
         controller.run(),
-        transmit_motor_random(controller, radio_lock, unicast_radio, num_motors=num_motors),
-        transmit_voice_random(controller, radio_lock, unicast_radio, channels=voice_channels),
+        transmit_motor_random(controller, radio_lock, unicast_radio),
+        transmit_voice_random(controller, radio_lock, unicast_radio),
         receive_objs({'AudioBuffer': display_fftnet(d, controller), 'MJpegCamFrame': display_mjpg_cv(d, controller)})(unicast_dish)
     )
 
