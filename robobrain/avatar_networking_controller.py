@@ -10,8 +10,6 @@ Options:
     <network>                        The network config to use (adhoc, wifi, localhost)
     <num_motors>                    The number of motors in the avatar
     --voice_channels=<spk_chan>   The number of speaker channels. [default: 1]
-    --mic_channels=<mic_chan>       The number of microphone channels. [default: 1]
-    --camera_resolution=<res>       The v4l2 camera resolution. [default: 320x240]
 """
 
 import asyncio
@@ -67,9 +65,7 @@ async def transmit_voice_random(radio_lock, radio, channels=1, fft_size=1536):
 
 async def udp_loop(ctx, local_ip, client_ip, args):
     num_motors = args['<num_motors>']
-    camera_resolution = args['--camera_resolution']
     voice_channels = int(args['--voice_channels'])
-    mic_channels = int(args['--mic_channels'])
 
     radio_lock = asyncio.Lock()
 
