@@ -2,17 +2,19 @@
 Avatar Networking Controller
 
 Usage:
-    anc <network> <num_motors> [--speaker_channels=<spk_chan>] [--mic_channels=<mic_chan>] [--camera_resolution=<res>]
-    ani -h | --help
-    ani --version
+    anc <network> <out_vec_len> [--voice_channels=<spk_chan>]
+    anc -h | --help
+    anc --version
 
 Options:
     <network>                        The network config to use (adhoc, wifi, localhost)
-    <num_motors>                    The number of motors in the avatar
+    <out_vec_len>                    The number of motors in the avatar
     --voice_channels=<spk_chan>   The number of speaker channels. [default: 1]
 """
 
 import asyncio
+import threading
+
 import zmq
 import zmq.asyncio
 from robonet.receive_callbacks import receive_objs
@@ -28,68 +30,67 @@ from robonet.buffers.buffer_objects import AudioBuffer
 from robonet.receive_callbacks import create_pyramid
 from robonet import camera
 import cv2
-import time
-
+import threading
 class AvatarBrain:
-    def __init__(self, num_motors=8, voice_channels=1, voice_fft_size=1536, camera_resolution=(640, 480), mic_channels=1):
-        self.num_motors = num_motors
+    def __init__(self, out_vec_len=8, voice_channels=1, voice_fft_size=1536, camera_resolution=(640, 480), mic_channels=1):
+        self.out_vec_len = out_vec_len
         self.voice_channels = voice_channels
         self.camera_resolution = camera_resolution
         self.mic_channels = mic_channels
         self.voice_fft_size = voice_fft_size
 
         # Data buffers
-        self.motor_data = None
-        self.voice_data = None
+        self.motor_data = np.zeros([self.out_vec_len], dtype=np.float32)
+        self.voice_data = np.zeros([self.voice_fft_size, self.voice_channels], dtype=np.float32)
         self.camera_data = None
         self.mic_data = None
 
         # Locks for thread-safe access
-        self.motor_lock = asyncio.Lock()
-        self.voice_lock = asyncio.Lock()
-        self.camera_lock = asyncio.Lock()
-        self.mic_lock = asyncio.Lock()
+        self.motor_lock = threading.Lock()
+        self.voice_lock = threading.Lock()
+        self.camera_lock = threading.Lock()
+        self.mic_lock = threading.Lock()
 
     # Motor data handling
-    async def set_motor_data(self, data):
-        async with self.motor_lock:
+    def set_motor_data(self, data):
+        with self.motor_lock:
             self.motor_data = data
 
-    async def get_motor_data(self):
-        async with self.motor_lock:
+    def get_motor_data(self):
+        with self.motor_lock:
             return self.motor_data
 
     # Voice data handling
-    async def set_voice_data(self, data):
-        async with self.voice_lock:
+    def set_voice_data(self, data):
+        with self.voice_lock:
             self.voice_data = data
 
-    async def get_voice_data(self):
-        async with self.voice_lock:
+    def get_voice_data(self):
+        with self.voice_lock:
             return self.voice_data
 
     # Camera data handling
-    async def set_camera_data(self, data):
-        async with self.camera_lock:
+    def set_camera_data(self, data):
+        with self.camera_lock:
             self.camera_data = data
 
-    async def get_camera_data(self):
-        async with self.camera_lock:
+    def get_camera_data(self):
+        with self.camera_lock:
             return self.camera_data
 
     # Mic data handling
-    async def set_mic_data(self, data):
-        async with self.mic_lock:
+    def set_mic_data(self, data):
+        with self.mic_lock:
             self.mic_data = data
 
-    async def get_mic_data(self):
-        async with self.mic_lock:
+    def get_mic_data(self):
+        with self.mic_lock:
             return self.mic_data
 
     async def run(self):
         while True:
-            await self.set_motor_data(np.random.random([self.num_motors]))
-            await self.set_voice_data(np.random.random([self.voice_fft_size, self.voice_channels]))
+            self.set_motor_data(np.random.random([self.out_vec_len]).astype(np.float32))
+            self.set_voice_data(np.random.random([self.voice_fft_size, self.voice_channels]).astype(np.float32))
 
             print('hi')
             await asyncio.sleep(0)
@@ -97,15 +98,15 @@ async def transmit_motor_random(controller, radio_lock, radio):
     """Async function to transmit random motor data"""
     print("transmitting random motor data..")
     while True:
-        #out_arr = np.random.random([controller.num_motors])
-        out_arr = await controller.get_motor_data()  # gets latest motor data, non-blocking
+        #out_arr = np.random.random([controller.out_vec_len])
+        out_arr = controller.get_motor_data()  # gets latest motor data, non-blocking
 
         # Send direct messages to the server
         direct_message = TensorBuffer([out_arr])
         direct_message = pack_obj(direct_message)
         parts = [direct_message[i:i + 4096] for i in range(0, len(direct_message), 4096)]
 
-        await send_burst(radio_lock, radio, bytes([random.randint(0, 255)]), parts)
+        send_burst(radio_lock, radio, bytes([random.randint(0, 255)]), parts)
         print(f"Sent motor frame")
         await asyncio.sleep(0)
 
@@ -114,14 +115,15 @@ async def transmit_voice_random(controller, radio_lock, radio):
     print("transmitting random voice data..")
     while True:
         #out_arr = np.random.random([fft_size, controller.voice_channels])
-        out_arr = await controller.get_voice_data()  # gets latest voice data, non-blocking
+        out_arr = controller.get_voice_data()  # gets latest voice data, non-blocking
 
         # Send direct messages to the server
+        # todo: this needs to be distinct from the motor tensor. For now, maybe send audio data. Later, label buffers.
         direct_message = TensorBuffer([out_arr])
         direct_message = pack_obj(direct_message)
         parts = [direct_message[i:i + 4096] for i in range(0, len(direct_message), 4096)]
 
-        await send_burst(radio_lock, radio, bytes([random.randint(0, 255)]), parts)
+        send_burst(radio_lock, radio, bytes([random.randint(0, 255)]), parts)
         print(f"Sent voice frame")
         await asyncio.sleep(0)
 
@@ -160,46 +162,24 @@ def display_fftnet(displayer, controller):
     return fft_to_nnet
 
 def display_mjpg_cv(displayer, controller):
-    def display_mjpeg(unicast_radio, unicast_dish):
-        while True:
-            try:
-                direct_message = f"Direct message from server"
-                unicast_radio.send(direct_message.encode("utf-8"), group="direct")
-                print(f"Sent: {direct_message}")
+    def display_mjpeg(obj):
+        imgb = camera.CameraPack.unpack_frame(obj.mjpeg)
+        img = camera.CameraPack.to_cv2_image(imgb)
+        try:
+            if img is not None and img.size > 0:
+                controller.set_camera_data(img)
+                displayer.update(img, 'Camera Stream')
+        except cv2.error as e:
+            print(f"OpenCV error: {e}")
 
-                try:
-                    msg = unicast_dish.recv(copy=False)
-                    msg_bytes = [msg.bytes[1:]]
-                    while msg.bytes[0] == ord(b"m"):  # snd more doesn't work for udp
-                        msg = unicast_dish.recv(copy=False)
-                        msg_bytes.append(msg.bytes[1:])
-                    msg = b"".join(msg_bytes)
-
-                    width, height, jpg_bytes, test_variable = (
-                        camera.CameraPack.unpack_frame(msg)
-                    )
-                    img = camera.CameraPack.to_cv2_image(jpg_bytes)
-                    try:
-                        if img is not None and img.size > 0:
-                            controller.set_camera_data(img)
-                            displayer.update(img, 'Camera Stream')
-                    except cv2.error as e:
-                        print(f"OpenCV error: {e}")
-
-                    print(f"Received direct message: {test_variable}")
-                except zmq.Again:
-                    print("No direct message yet")
-                    time.sleep(1.0 / 120)
-            except KeyboardInterrupt:
-                break
 
     return display_mjpeg
 
 async def udp_loop(ctx, local_ip, client_ip, args):
-    num_motors = args['<num_motors>']
+    out_vec_len = int(args['<out_vec_len>'])
     voice_channels = int(args['--voice_channels'])
 
-    radio_lock = asyncio.Lock()
+    radio_lock = threading.Lock()
 
     unicast_radio = ctx.socket(zmq.RADIO)
     unicast_radio.setsockopt(zmq.LINGER, 0)
@@ -207,21 +187,20 @@ async def udp_loop(ctx, local_ip, client_ip, args):
     unicast_dish = ctx.socket(zmq.DISH)
     unicast_dish.setsockopt(zmq.LINGER, 0)
     unicast_dish.setsockopt(zmq.CONFLATE, 1)
-    unicast_dish.rcvtimeo = 1000
+    unicast_dish.rcvtimeo = 1000  # check messages quickly and then move to other IO threads
 
     unicast_dish.bind(f"udp://{local_ip}:9998")
     unicast_dish.join("direct")
     unicast_radio.connect(f"udp://{client_ip}:9999")
 
-    controller = AvatarBrain(num_motors=num_motors, voice_channels=voice_channels)
+    controller = AvatarBrain(out_vec_len=out_vec_len, voice_channels=voice_channels)
     d = display()
 
-    # todo: modify display_fft
     await asyncio.gather(
-        controller.run(),
+        controller.run(), # todo: this is compute heavy. Run it in another thread.
         transmit_motor_random(controller, radio_lock, unicast_radio),
         transmit_voice_random(controller, radio_lock, unicast_radio),
-        receive_objs({'AudioBuffer': display_fftnet(d, controller), 'MJpegCamFrame': display_mjpg_cv(d, controller)})(unicast_dish)
+        receive_objs({'AudioBuffer': display_fftnet(d, controller), 'MJpegCamFrame': display_mjpg_cv(d, controller)})(unicast_radio, unicast_dish)
     )
 
     unicast_radio.close()
